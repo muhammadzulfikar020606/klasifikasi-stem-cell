@@ -1,0 +1,13 @@
+{
+  "name": "neural-stem-cell-classifier",
+  "version": "1.0.0",
+  "description": "Interactive Web Interface for Neural Stem Cell Differentiation Classification (AMRANET & Xception)",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve ."
+  },
+  "keywords": ["neural-stem-cell", "classification", "amranet", "xception", "deep-learning"],
+  "author": "Muhammad Zulfikar",
+  "license": "MIT"
+}
+
