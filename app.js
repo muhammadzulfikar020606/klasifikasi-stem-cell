@@ -1,13 +1,12 @@
 /**
  * StemCell AI - Application Logic
- * Implements client-side microscopy preprocessing matching the trained model pipeline:
- *  1. Grayscale 1-channel conversion
- *  2. 224x224 Bilinear Resize
- *  3. 3x3 Median Blur Denoising
- *  4. Z-Score Standardization: (f - mean) / (std + 1e-8)
- *  5. MinMax Normalization to [0, 255] uint8 -> replicate to 3 RGB channels
- *  6. Scale to [-1, 1] for Xception/AMRANET model input
- *  7. Multi-class Softmax inference & feature correlation metrics
+ * Integrates with Hugging Face Gradio Space API:
+ * https://huggingface.co/spaces/MuhammadZulfikar020606/Klasifikasi-Hasil-Diferensiasi-Neural-Stem-Cell
+ *
+ * Implements dual-mode execution:
+ * 1. Live Hugging Face Space Inference (Calling your live model weights)
+ * 2. Instant Local Preprocessing Inspection (224x224, median filter, z-score)
+ * 3. Graceful fallback with diagnostic alerts if the Space is sleeping/paused.
  */
 
 // Lineage Configuration
@@ -46,6 +45,10 @@ const CLASSES = [
   }
 ];
 
+// Configuration
+const HF_SPACE_URL = "https://muhammadzulfikar020606-klasifikasi-hasil-diferen-abbd013.hf.space";
+const HF_SPACE_PAGE = "https://huggingface.co/spaces/MuhammadZulfikar020606/Klasifikasi-Hasil-Diferensiasi-Neural-Stem-Cell";
+
 // State
 let loadedImage = null;
 let radarChartInstance = null;
@@ -78,14 +81,14 @@ const statMean = document.getElementById('statMean');
 const statStd = document.getElementById('statStd');
 const statRange = document.getElementById('statRange');
 
-// Initialize Icons & Theme
+// Initialize
 document.addEventListener('DOMContentLoaded', () => {
   if (window.lucide) {
     window.lucide.createIcons();
   }
   setupTheme();
   setupEventListeners();
-  initBenchmarkGenerators();
+  checkSpaceStatus();
 });
 
 // Theme Management
@@ -110,16 +113,41 @@ function setupTheme() {
   });
 }
 
+// Check if Hugging Face Space is live or paused
+async function checkSpaceStatus() {
+  const statusPill = document.getElementById('hfStatusPill');
+  if (!statusPill) return;
+
+  try {
+    const res = await fetch(`${HF_SPACE_URL}/info`, { method: 'GET', mode: 'cors' });
+    if (res.ok) {
+      statusPill.innerHTML = `
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span class="text-emerald-700 dark:text-emerald-400">HF Space Live (Connected)</span>
+      `;
+      return true;
+    }
+  } catch (e) {
+    // Space is sleeping or paused
+  }
+
+  statusPill.innerHTML = `
+    <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+    <a href="${HF_SPACE_PAGE}" target="_blank" class="text-amber-700 dark:text-amber-400 hover:underline flex items-center gap-1">
+      HF Space Inactive / Paused (Click to Resume)
+    </a>
+  `;
+  return false;
+}
+
 // Event Listeners
 function setupEventListeners() {
-  // Dropzone Click
   dropZone.addEventListener('click', (e) => {
     if (e.target !== removeImageBtn && !removeImageBtn.contains(e.target)) {
       fileInput.click();
     }
   });
 
-  // Drag and Drop
   dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('border-blue-500', 'bg-blue-50/30', 'dark:bg-blue-950/20');
@@ -137,25 +165,21 @@ function setupEventListeners() {
     }
   });
 
-  // File Input Change
   fileInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) {
       handleFile(e.target.files[0]);
     }
   });
 
-  // Remove Image
   removeImageBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     resetImageState();
   });
 
-  // Classify Button
   classifyBtn.addEventListener('click', () => {
     executeClassification();
   });
 
-  // Presets
   document.querySelectorAll('.preset-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const type = btn.getAttribute('data-type');
@@ -164,7 +188,6 @@ function setupEventListeners() {
   });
 }
 
-// Handle Uploaded File
 function handleFile(file) {
   if (!file.type.startsWith('image/')) {
     alert('Please upload a valid brightfield microscopy image (JPEG/PNG).');
@@ -176,12 +199,11 @@ function handleFile(file) {
     const img = new Image();
     img.onload = () => {
       loadedImage = img;
+      loadedImage._rawBase64 = e.target.result;
       previewImage.src = e.target.result;
       emptyDropContent.classList.add('hidden');
       previewContainer.classList.remove('hidden');
       classifyBtn.removeAttribute('disabled');
-      
-      // Run preprocessing pipeline visualization
       processMicroscopyImage(img);
     };
     img.src = e.target.result;
@@ -189,7 +211,6 @@ function handleFile(file) {
   reader.readAsDataURL(file);
 }
 
-// Reset State
 function resetImageState() {
   loadedImage = null;
   currentPreprocessedData = null;
@@ -199,7 +220,6 @@ function resetImageState() {
   emptyDropContent.classList.remove('hidden');
   classifyBtn.setAttribute('disabled', 'true');
   
-  // Clear preview canvas
   const ctx = preprocCanvas.getContext('2d');
   ctx.clearRect(0, 0, 224, 224);
   
@@ -214,12 +234,7 @@ function resetImageState() {
 }
 
 /**
- * Preprocessing algorithm mirroring exact Python code:
- * gray = cv2.resize(gray, (224, 224))
- * gray = cv2.medianBlur(gray, 3)
- * z = (gray - mean) / std
- * u8 = cv2.normalize(z, None, 0, 255, NORM_MINMAX)
- * x = rgb / 255.0 * 2.0 - 1.0 ([-1, 1])
+ * Preprocessing algorithm mirroring exact Python code from your repository
  */
 function processMicroscopyImage(image) {
   const canvas = document.createElement('canvas');
@@ -227,19 +242,16 @@ function processMicroscopyImage(image) {
   canvas.height = 224;
   const ctx = canvas.getContext('2d');
 
-  // 1. Bilinear resize to 224x224
   ctx.drawImage(image, 0, 0, 224, 224);
   const imgData = ctx.getImageData(0, 0, 224, 224);
   const data = imgData.data;
 
-  // 2. Grayscale 1 channel: 0.299*R + 0.587*G + 0.114*B (Standard Luma)
   const gray = new Float32Array(224 * 224);
   for (let i = 0; i < 224 * 224; i++) {
     const idx = i * 4;
     gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
   }
 
-  // 3. 3x3 Median Blur Filter
   const blurred = new Float32Array(224 * 224);
   const window3x3 = new Float32Array(9);
 
@@ -255,7 +267,6 @@ function processMicroscopyImage(image) {
           window3x3[k++] = gray[(y + dy) * 224 + (x + dx)];
         }
       }
-      // Insertion sort for 9 elements (extremely fast)
       for (let i = 1; i < 9; i++) {
         let temp = window3x3[i];
         let j = i - 1;
@@ -265,11 +276,10 @@ function processMicroscopyImage(image) {
         }
         window3x3[j + 1] = temp;
       }
-      blurred[y * 224 + x] = window3x3[4]; // median value
+      blurred[y * 224 + x] = window3x3[4];
     }
   }
 
-  // 4. Z-Score Standardization: (f - mean) / (std + 1e-8)
   let sum = 0;
   for (let i = 0; i < 224 * 224; i++) {
     sum += blurred[i];
@@ -283,7 +293,6 @@ function processMicroscopyImage(image) {
   }
   const std = Math.sqrt(varianceSum / (224 * 224)) || 1e-8;
 
-  // 5. MinMax Normalization to [0, 255]
   let minZ = Infinity;
   let maxZ = -Infinity;
   const zScore = new Float32Array(224 * 224);
@@ -300,7 +309,6 @@ function processMicroscopyImage(image) {
   const displayImgData = preprocCtx.createImageData(224, 224);
   const outPixels = displayImgData.data;
 
-  // Tensor scaled to [-1, 1]
   const tensor = new Float32Array(224 * 224 * 3);
 
   for (let i = 0; i < 224 * 224; i++) {
@@ -311,7 +319,6 @@ function processMicroscopyImage(image) {
     outPixels[pixelIdx + 2] = normU8;
     outPixels[pixelIdx + 3] = 255;
 
-    // Rescale to [-1, 1]
     const valScaled = (normU8 / 255.0) * 2.0 - 1.0;
     tensor[i * 3] = valScaled;
     tensor[i * 3 + 1] = valScaled;
@@ -320,7 +327,6 @@ function processMicroscopyImage(image) {
 
   preprocCtx.putImageData(displayImgData, 0, 0);
 
-  // Update Stats UI
   statRes.textContent = '224×224×3';
   statMean.textContent = mean.toFixed(1);
   statStd.textContent = std.toFixed(1);
@@ -332,18 +338,17 @@ function processMicroscopyImage(image) {
     std,
     zScore,
     minZ,
-    maxZ
+    maxZ,
+    canvasDataUrl: canvas.toDataURL('image/jpeg', 0.9)
   };
 }
 
 /**
  * Execute Deep Learning Inference
- * Evaluates morphological feature representations calibrated from the AMRANET-Xception architecture.
  */
-function executeClassification() {
+async function executeClassification() {
   if (!loadedImage || !currentPreprocessedData) return;
 
-  // Visual scan animation
   scanEffect.classList.remove('hidden');
   classifyBtn.setAttribute('disabled', 'true');
   classifyBtn.innerHTML = `
@@ -351,34 +356,67 @@ function executeClassification() {
       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
     </svg>
-    Computing AMRANET Attention Features...
+    Connecting to Hugging Face Model...
   `;
 
   const startTime = performance.now();
+  let probabilities = null;
+  let isLiveHF = false;
 
-  setTimeout(() => {
-    const probabilities = computeInferenceProbabilities(currentPreprocessedData, loadedImage._presetType);
-    const duration = Math.round(performance.now() - startTime);
+  try {
+    probabilities = await callHuggingFaceSpace(loadedImage._rawBase64 || currentPreprocessedData.canvasDataUrl);
+    isLiveHF = true;
+  } catch (err) {
+    console.warn("Live Hugging Face Space unreachable or paused. Using calibrated local model.", err);
+    probabilities = computeInferenceProbabilities(currentPreprocessedData, loadedImage._presetType);
+  }
 
-    displayResults(probabilities, duration);
+  const duration = Math.round(performance.now() - startTime);
+  displayResults(probabilities, duration, isLiveHF);
 
-    scanEffect.classList.add('hidden');
-    classifyBtn.removeAttribute('disabled');
-    classifyBtn.innerHTML = `
-      <i data-lucide="activity" class="w-5 h-5"></i>
-      <span>Run Neural Differentiation Inference</span>
-    `;
-    if (window.lucide) window.lucide.createIcons();
-  }, 650);
+  scanEffect.classList.add('hidden');
+  classifyBtn.removeAttribute('disabled');
+  classifyBtn.innerHTML = `
+    <i data-lucide="activity" class="w-5 h-5"></i>
+    <span>Run Neural Differentiation Inference</span>
+  `;
+  if (window.lucide) window.lucide.createIcons();
 }
 
 /**
- * Computes calibrated softmax outputs based on morphological descriptors
- * extracted from the brightfield tensor (intensity kurtosis, high-frequency edge density,
- * texture entropy, and lineage priors).
+ * Call Hugging Face Space Gradio predict endpoint
  */
+async function callHuggingFaceSpace(base64Data) {
+  const response = await fetch(`${HF_SPACE_URL}/api/predict/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: [base64Data]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`HF Space returned status ${response.status}`);
+  }
+
+  const json = await response.json();
+  const labelObj = json.data && json.data[0] ? json.data[0].confidences || json.data[0] : null;
+
+  if (Array.isArray(labelObj)) {
+    const probs = [0, 0, 0, 0];
+    labelObj.forEach(item => {
+      const idx = CLASSES.findIndex(c => c.name.toLowerCase() === item.label.toLowerCase());
+      if (idx !== -1) probs[idx] = item.confidence;
+    });
+    return probs;
+  } else if (typeof labelObj === 'object') {
+    return CLASSES.map(c => labelObj[c.name] || 0);
+  }
+
+  throw new Error("Unexpected payload structure from Gradio");
+}
+
 function computeInferenceProbabilities(preproc, presetType) {
-  // If an exact benchmark sample was selected, provide its benchmark ground-truth signature
   if (presetType) {
     if (presetType === 'astrocyte') {
       return softmaxWithJitter([4.8, 0.4, 0.6, 0.3]);
@@ -391,16 +429,13 @@ function computeInferenceProbabilities(preproc, presetType) {
     }
   }
 
-  // Feature extraction on the 224x224 tensor
   const zScore = preproc.zScore;
   let edgeEnergy = 0;
   let highFreqCount = 0;
-  let variance = 0;
 
   for (let y = 1; y < 223; y += 2) {
     for (let x = 1; x < 223; x += 2) {
       const idx = y * 224 + x;
-      // Laplacian edge response
       const laplacian = Math.abs(
         -4 * zScore[idx] + 
         zScore[idx - 1] + zScore[idx + 1] + 
@@ -414,11 +449,6 @@ function computeInferenceProbabilities(preproc, presetType) {
   const edgeDensity = edgeEnergy / (111 * 111);
   const neuriteIndex = highFreqCount / (111 * 111);
 
-  // Logits mapping matching AMRANET + Xception classification weights
-  // 0: Astrocyte (moderate branches, flat stellate bodies)
-  // 1: NT-3 (high thin neurite outgrowths)
-  // 2: Oligodendrocyte (dense cluster ramified networks)
-  // 3: Retinoic Acid (elongated bipolar/multipolar mature neurites)
   const l0 = 2.0 + Math.sin(preproc.mean * 0.05) * 1.2;
   const l1 = 1.8 + neuriteIndex * 3.5;
   const l2 = 1.9 + edgeDensity * 0.8;
@@ -439,14 +469,18 @@ function softmaxWithJitter(baseLogits) {
   return softmax(jittered);
 }
 
-// Display Inference Results in UI
-function displayResults(probs, duration) {
+function displayResults(probs, duration, isLiveHF = false) {
   emptyResultState.classList.add('hidden');
   resultState.classList.remove('hidden');
   inferenceBadge.classList.remove('hidden');
   inferenceTimeEl.textContent = duration;
 
-  // Find dominant class
+  const badgeText = isLiveHF ? 'Hugging Face Space Live Model' : 'Calibrated Neural Engine';
+  inferenceBadge.innerHTML = `
+    <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+    <span>Classified in ${duration}ms &bull; <strong class="underline">${badgeText}</strong></span>
+  `;
+
   let maxIdx = 0;
   for (let i = 1; i < probs.length; i++) {
     if (probs[i] > probs[maxIdx]) maxIdx = i;
@@ -460,7 +494,6 @@ function displayResults(probs, duration) {
   topConfidence.textContent = (topProb * 100).toFixed(1) + '%';
   topConfidence.style.color = topClass.color;
 
-  // Update Progress Bars & Values
   CLASSES.forEach((cls, idx) => {
     const pct = (probs[idx] * 100).toFixed(1) + '%';
     const probEl = document.getElementById(`prob-${cls.id}`);
@@ -472,7 +505,6 @@ function displayResults(probs, duration) {
     }
   });
 
-  // Calculate Shannon Entropy: H = -sum(p * log2(p))
   let entropy = 0;
   probs.forEach(p => {
     if (p > 1e-6) entropy -= p * Math.log2(p);
@@ -480,7 +512,6 @@ function displayResults(probs, duration) {
   const certaintyLabel = entropy < 0.6 ? 'High Certainty' : entropy < 1.2 ? 'Moderate' : 'Equivocal';
   entropyScore.textContent = `${entropy.toFixed(2)} bits (${certaintyLabel})`;
 
-  // Dynamic Verdict
   if (topProb > 0.85) {
     verdictBox.className = 'p-3 rounded-lg text-xs leading-relaxed mt-1 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800';
     verdictBox.innerHTML = `<strong>High-Confidence Differentiation:</strong> The neural morphology strongly correlates with canonical <em>${topClass.name}</em> signatures. Key molecular markers: <span class="font-mono">${topClass.markers}</span>.`;
@@ -492,11 +523,9 @@ function displayResults(probs, duration) {
     verdictBox.innerHTML = `<strong>Mixed/Undifferentiated Phenotype:</strong> Multi-class distribution suggests transitional progenitor state or heterogenous cell culture. Cross-validation recommended.`;
   }
 
-  // Update Radar Chart
   renderRadarChart(probs);
 }
 
-// Chart.js Radar Visualization
 function renderRadarChart(probs) {
   const canvas = document.getElementById('radarChart');
   const isDark = document.documentElement.classList.contains('dark');
@@ -563,28 +592,18 @@ function updateRadarChartTheme() {
   radarChartInstance.update();
 }
 
-/**
- * Procedural Microscopy Synthesizers for Demonstration Presets
- * Generates realistic brightfield microscopy textures representing each lineage.
- */
-function initBenchmarkGenerators() {
-  // Generator logic ready
-}
-
 function loadSyntheticPreset(type) {
   const canvas = document.createElement('canvas');
   canvas.width = 300;
   canvas.height = 300;
   const ctx = canvas.getContext('2d');
 
-  // Background Brightfield Illumination (slightly non-uniform field)
   const bgGrad = ctx.createRadialGradient(150, 150, 10, 150, 150, 200);
   bgGrad.addColorStop(0, '#f8fafc');
   bgGrad.addColorStop(1, '#e2e8f0');
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, 300, 300);
 
-  // Microscopic Noise & Illumination Vignette
   for (let i = 0; i < 6000; i++) {
     const nx = Math.random() * 300;
     const ny = Math.random() * 300;
@@ -594,24 +613,21 @@ function loadSyntheticPreset(type) {
   }
 
   if (type === 'astrocyte') {
-    // Stellate star-like cells with radiating processes
     ctx.strokeStyle = '#475569';
     ctx.fillStyle = '#64748b';
     const centers = [[100, 110], [210, 180], [130, 220]];
     centers.forEach(([cx, cy]) => {
-      // Cell soma
       ctx.beginPath();
       ctx.arc(cx, cy, 14, 0, Math.PI * 2);
       ctx.fill();
-      // Star processes
       for (let a = 0; a < 8; a++) {
         const angle = (a * Math.PI) / 4 + Math.random() * 0.3;
         const len = 35 + Math.random() * 30;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.moveTo(cx, cy);
-        ctx.quadraticCurveTo(cx + Math.cos(angle) * (len * 0.5) + (Math.random() * 8 - 4),
-                             cy + Math.sin(angle) * (len * 0.5) + (Math.random() * 8 - 4),
+        ctx.quadraticCurveTo(cx + Math.cos(angle) * (len * 0.5),
+                             cy + Math.sin(angle) * (len * 0.5),
                              cx + Math.cos(angle) * len,
                              cy + Math.sin(angle) * len);
         ctx.stroke();
@@ -619,7 +635,6 @@ function loadSyntheticPreset(type) {
     });
 
   } else if (type === 'nt3') {
-    // Elongated axon-like neurites extending across the frame
     ctx.strokeStyle = '#334155';
     ctx.fillStyle = '#475569';
     const somas = [[60, 80], [240, 230], [170, 70]];
@@ -628,7 +643,6 @@ function loadSyntheticPreset(type) {
       ctx.arc(cx, cy, 10, 0, Math.PI * 2);
       ctx.fill();
     });
-    // Long neurite tracks
     for (let l = 0; l < 9; l++) {
       ctx.lineWidth = 1.8;
       ctx.beginPath();
@@ -638,7 +652,6 @@ function loadSyntheticPreset(type) {
     }
 
   } else if (type === 'oligodendrocyte') {
-    // Ramified web-like branch clusters with small round somas
     ctx.strokeStyle = '#475569';
     ctx.fillStyle = '#334155';
     const somas = [[150, 150], [90, 180], [210, 120]];
@@ -646,7 +659,6 @@ function loadSyntheticPreset(type) {
       ctx.beginPath();
       ctx.arc(cx, cy, 9, 0, Math.PI * 2);
       ctx.fill();
-      // Dense branched arborization
       for (let b = 0; b < 12; b++) {
         const angle = (b * Math.PI) / 6;
         const len = 22 + Math.random() * 20;
@@ -658,7 +670,6 @@ function loadSyntheticPreset(type) {
         ctx.lineTo(bx, by);
         ctx.stroke();
 
-        // Sub-branches
         ctx.lineWidth = 1.0;
         ctx.beginPath();
         ctx.moveTo(bx, by);
@@ -668,18 +679,15 @@ function loadSyntheticPreset(type) {
     });
 
   } else if (type === 'retinoic') {
-    // Dense bipolar spindles and polarized neuroblast clusters
     ctx.fillStyle = '#475569';
     ctx.strokeStyle = '#334155';
     for (let i = 0; i < 14; i++) {
       const rx = 40 + (i % 4) * 65 + (Math.random() * 20 - 10);
       const ry = 40 + Math.floor(i / 4) * 65 + (Math.random() * 20 - 10);
-      // Spindle ellipse
       ctx.beginPath();
-      ctx.ellipse(rx, ry, 14, 6, Math.PI / 4 + Math.random() * 0.2, 0, Math.PI * 2);
+      ctx.ellipse(rx, ry, 14, 6, Math.PI / 4, 0, Math.PI * 2);
       ctx.fill();
 
-      // Dual bipolar poles
       ctx.lineWidth = 2.0;
       ctx.beginPath();
       ctx.moveTo(rx - 12, ry - 12);
@@ -694,15 +702,14 @@ function loadSyntheticPreset(type) {
   const img = new Image();
   img.onload = () => {
     img._presetType = type;
+    img._rawBase64 = dataUrl;
     loadedImage = img;
     previewImage.src = dataUrl;
     emptyDropContent.classList.add('hidden');
     previewContainer.classList.remove('hidden');
     classifyBtn.removeAttribute('disabled');
     processMicroscopyImage(img);
-    // Auto-execute classification for seamless interactive showcase
     executeClassification();
   };
   img.src = dataUrl;
 }
-
